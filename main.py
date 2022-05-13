@@ -1,60 +1,74 @@
-def read_file(file_name):
+import pathlib
+
+# MAGIC VARIABLES
+
+child_addr = b"fe80:0:0:0:588a"
+master_addr = b"fe80:0:0:0:243a"
+multi_cast = b"ff02:0:0:0:0:0:"
+child_determiner = b'\x43\x48\x49\x4C\x44'
+master_determiner = b'\x4D\x41\x53\x54\x45\x52'
+
+
+def read_file(file_name: pathlib.Path) -> str:
+    """Open file as binary and return the data."""
     with open(file_name, "rb") as file:
         data = file.read()
     return data
 
 
-def print_hex(data) -> str:
+def print_hex(data: bin) -> str:
+    """Print a string as hexadecimal."""
     return " ".join(["{:02X}".format(x) for x in data])
 
 
-def handle_child(data):
+def handle_messages(data: bin, determ: bin) -> list:
+    """
+    Parse the data and return a dictionary with the messages.
+    :param data: binary data to parse
+    :param determ: determinator to look for new messages
+    :return: list of dictionary with the following: {count: int, destination: bin, message: bin}
+    """
     messages = []
     for i in range(len(data)):
-        if data[i:i + 5] == b'\x43\x48\x49\x4C\x44':
-            count = 0
-            j = 0
-            for j in range(i + 6, len(data)):
-                if data[j:j + 1] == b'\x5B':
-                    count = int(data[i + 6:j])
+        if data[i:i + len(determ)] == determ:
+            q = j = count = 0
+            dest_addr = None
+
+            for j in range(i + len(determ) + 1, len(data)):
+                if data[j:j + 1] == b'\x3A':
+                    count = int(data[i + len(determ) + 1:j])
+                    break
+            for q in range(j + 1, len(data)):
+                if data[q:q + 1] == b'\x5B':
+                    dest_addr = data[j + 1:q]
                     break
 
-            for o in range(j + 1, len(data)):
+            for o in range(q + 1, len(data)):
                 if data[o:o + 1] == b'\x5D':
                     messages.append({
+                        "destination": dest_addr,
                         "count": count,
-                        "message": data[j + 1:o],
+                        "message": data[q + 1:o]
                     })
                     break
     return messages
 
 
-def handle_master(data):
-    messages = []
-    for i in range(len(data)):
-        if data[i:i + 6] == b'\x4D\x41\x53\x54\x45\x52':
-            count = 0
-            j = 0
-            for j in range(i + 7, len(data)):
-                if data[j:j + 1] == b'\x5B':
-                    count = int(data[i + 7:j])
-                    break
-
-            for o in range(j + 1, len(data)):
-                if data[o:o + 1] == b'\x5D':
-                    messages.append({
-                        "count": count,
-                        "message": data[j + 1:o]
-                    })
-                    break
-    return messages
-
-
-def assign_command_type(messages):
+def assign_command_type(messages: bin) -> dict:
+    """
+    Assign the command type and the TLV names to the message.
+    :param messages: binary data
+    :return: the same dictionary, but with command_type and tlvs
+    """
     for message in messages:
         if message == {}:
             continue
-        command_type = message.get("message")[11:12]
+        if message.get("message")[0:1] == b'\xFF':
+            command_type = message.get("message")[1:2]
+            message["tlvs"] = parse_message(message.get("message")[2:])
+        else:
+            command_type = message.get("message")[11:12]
+            message["tlvs"] = parse_message(message.get("message")[12:])
         if command_type == b'\x00':
             message["command_type"] = {"command_index": 0, "name": "Link Request"}
         elif command_type == b'\x01':
@@ -96,40 +110,13 @@ def assign_command_type(messages):
     return messages
 
 
-def main():
-    messages = handle_child(read_file("child.bin"))
-    messages = assign_command_type(messages)
-    print("Child:")
-    for message in messages:
-        print("{}: {}".format(message.get("count"), message.get("command_type")))
-    messages = handle_master(read_file("master2.bin"))
-    messages = assign_command_type(messages)
-
-    print("Master:")
-    for message in messages:
-        print("{}: {}".format(message.get("count"), message.get("command_type")))
-
-
-def extract_link_messages():
-    child_messages = handle_child(read_file("child.bin"))
-    master_messages = handle_master(read_file("master.bin"))
-
-    child_messages = assign_command_type(child_messages)
-    master_messages = assign_command_type(master_messages)
-
-    link_messages = []
-    for index, message in enumerate(master_messages):
-        if message.get("command_type")["command_index"] in [0, 1, 2, 3]:
-            link_messages.append(message)
-        if child_messages[index].get("command_type")["command_index"] in [0, 1, 2, 3]:
-            link_messages.append(child_messages[index])
-
-    with open("link_messages.bin", "wb") as f:
-        for m in link_messages:
-            f.write(m.get("message"))
-
-
-def parse_message(msg, res=None) -> list:
+def parse_message(msg: bin, res=None) -> list:
+    """
+    Parse the message and return a list of TLVs.
+    :param msg: binary TLV data
+    :param res: list of TLVs. Initialized to none
+    :return: list of all TlVs in the message
+    """
     # The message can have several TLV's and we'll return a list of all TLV's in the message.
     if res is None:
         res = []
@@ -226,15 +213,33 @@ def parse_message(msg, res=None) -> list:
     return parse_message(msg[tlv_length + 2:], res)
 
 
-if __name__ == '__main__':
-    _msgs = handle_master(read_file("dd.bin"))
-    _msgs = assign_command_type(_msgs)
-
-    print("Master:")
-    for _msg in _msgs:
-        print("{}: {}".format(_msg.get("count"), _msg.get("command_type").get("name")))
-        for tlv in parse_message(_msg.get("message")[12:]):
-            pass
-            print("\t{}: {}".format(tlv.get("type"), print_hex(tlv.get("value"))))
+def print_parsed_message(file: pathlib.Path, msg: dict) -> None:
+    """Just a simple print utility."""
+    print(f"{file.name[:-4].capitalize()}:")
+    for _msg in msg:
+        if _msg.get("destination") == child_addr:
+            dest = "Child"
+        elif _msg.get("destination") == master_addr:
+            dest = "Master"
+        elif _msg.get("destination") == multi_cast:
+            dest = "Multicast"
+        else:
+            dest = _msg.get("destination")
+        print("\t{}: {} - Send to {}".format(_msg.get("count"), _msg.get("command_type").get("name"), dest))
+        for tlv in _msg.get("tlvs"):
+            print("\t\t{}: {}".format(tlv.get("type"), print_hex(tlv.get("value"))))
         # Print the complete message, as binary
         print("\t" + print_hex(_msg.get("message")))
+
+
+if __name__ == '__main__':
+    #child_file = pathlib.Path("child.bin")
+    #master_file = pathlib.Path("master.bin")
+    bb_file = pathlib.Path("test.bin")
+
+    #child_msg = assign_command_type(handle_messages(read_file(child_file), child_determiner))
+    #master_msg = assign_command_type(handle_messages(read_file(master_file), master_determiner))
+    bb_msg = assign_command_type(handle_messages(read_file(bb_file), master_determiner))
+    #print_parsed_message(child_file, child_msg)
+    #print_parsed_message(master_file, master_msg)
+    print_parsed_message(bb_file, bb_msg)
